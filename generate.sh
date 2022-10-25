@@ -1,4 +1,3 @@
-
 # download and extract wayland-master and wlroots-master, extract to ./headers, and scrub ./headers of any non-header files
 if ! test -d headers
 then 
@@ -22,66 +21,39 @@ then
 	printf "Done. \n"
 	printf "Sanitizing ./headers of non-header files..."
 	find ./headers/ ! -name *.h -delete 2>/dev/null
+	rm -r ./headers/wayland-master/tests/ ./headers/wlroots-master/examples/
 	printf " Done.\n"
 else
-	echo "ERROR: 'headers' already exists. Please remove or rename it, then try again."
-	exit 1
+	echo "ERROR: headers folder exists already."
 fi
 
-
-printf "Collecting constructors..."
-touch constructors
-echo > fix.lua $(cat <<-END
-local arg = arg[1] 
-local file=io.open(arg)
-local contents=file:read("a")
-file:close()
-
-local constructors = {}
-for n,c in contents:gmatch("[\\\\n\\\\r]struct ([%w_]+) (%b{});") do 
-	constructors[#constructors+1] = "['"..n.."'] = ffi.typeof('"..n.."'),"
-end 
-for n,c in contents:gmatch("[\\\\n\\\\r]enum ([%w_]+) (%b{});") do 
-	constructors[#constructors+1] = "['"..n.."'] = ffi.typeof('"..n.."'),"
-end 
-
-local file = io.open("constructors", "a+") 
-file:write(table.concat(constructors, " ")) 
-file:close()
-END
-)
-for i in $(find ./headers -type f)
-do
-	luajit fix.lua $i
-done
-printf " Done.\n"
-
-
-printf "Processing headers..."
+echo "Processing headers... [compiler output starts on next line]"
+FILES=$(find ./headers -type f)
 USE_UNSTABLE=true
-gcc -E $($USE_UNSTABLE && echo "-DWLR_USE_UNSTABLE" || echo "") -I/usr/include/drm $(find ./headers/wlroots-master/include/ -type d | sed 's/^/-I /') $(find ./headers -type f) | grep -v ^# | grep -v -e '^$' > compiled.h
-rm -r ./headers/
-printf " Done.\n"
+COMMAND="-Wall -E $($USE_UNSTABLE && echo '-DWLR_USE_UNSTABLE' || echo '') -I/usr/include/drm $(find ./headers/wlroots-master/include/ -type d | sed 's/^/-I /')"
+mkdir processed
+for f in $FILES
+do
+	after_slash=$(echo $f | sed 's:.*/::')
+	pafter="./processed/$after_slash"
+	gcc $COMMAND $f | grep -v '^#' | grep -v -e '^$' > $pafter
+	echo "local ffi=require('ffi') ffi.cdef[[typedef long double _Float128;typedef unsigned int socklen_t;\n$(cat $pafter)]] return ffi.C" > $pafter
+	
+	#there has got to be a better way to do this
+	perl -0777 -i.orig -pe "s/enum[\n\r]  {[\n\r]    FP_NAN =[\n\r]      0,[\n\r]    FP_INFINITE =[\n\r]      1,[\n\r]    FP_ZERO =[\n\r]      2,[\n\r]    FP_SUBNORMAL =[\n\r]      3,[\n\r]    FP_NORMAL =[\n\r]      4[\n\r]  };//gm" $pafter
+	perl -0777 -i.orig -pe "s/struct wl_message {[.\n\r ]*const char \*name;[.\n\r ]*const char \*signature;[.\n\r ]*const struct wl_interface \*\*types;[ .\n\r]*};//gm" $pafter
+	perl -0777 -i.orig -pe "s/struct timeval[\n\r]{[\n\r]  __time_t tv_sec;[\n\r]  __suseconds_t tv_usec;[\n\r]};//gm" $pafter
+	perl -0777 -i.orig -pe "s/struct wl_interface {[\n\r] const char \*name;[\n\r] int version;[\n\r] int method_count;[\n\r] const struct wl_message \*methods;[\n\r] int event_count;[\n\r] const struct wl_message \*events;[\n\r]};//gm" $pafter
+	rm $pafter.orig
+	
+	no_dot=$(echo $after_slash | sed 's/\..*//')
+	mv $pafter ./processed/$no_dot.lua
+	echo "local $(echo $no_dot | sed 's/-/_/g')=require('./processed/$no_dot')" >> requires
+done
+echo "Done."
 
-
-echo > fix.lua $(cat <<-END
-local file = io.open("compiled.h")
-local contents = file:read("a")
-file:close()
-
-contents = contents:gsub("([={};,])[ \\\\n\\\\r\\\\t]+","%1"):gsub("[ \\\\n\\\\r\\\\t]+([={};,])","%1")
-
-
-local file = io.open("compiled.h","r+")
-file:write(contents)
-file:close()
-END
-)
-luajit fix.lua
-
-
-printf "Finalizing..."
-echo "local ffi=require('ffi') ffi.cdef[[typedef uintptr_t _Float128; $(cat compiled.h)]] return {$(cat constructors)"} > wlroots.lua
-rm compiled.h constructors fix.lua
+printf "Consolidating output into single file and cleaning up..."
+echo "local ffi=require('ffi')\n ffi.cdef[[enum\n   {\n     FP_NAN =\n       0,\n     FP_INFINITE =\n       1,\n     FP_ZERO =\n       2,\n     FP_SUBNORMAL =\n       3,\n     FP_NORMAL =\n       4\n   };struct wl_message {\n    /** Message name */\n    const char *name;\n    /** Message signature */\n    const char *signature;\n    /** Object argument interfaces */\n    const struct wl_interface **types;\n};typedef long int __time_t; typedef long int __suseconds_t;struct timeval\n{\n  __time_t tv_sec;\n  __suseconds_t tv_usec;\n};struct wl_interface {\n const char *name;\n int version;\n int method_count;\n const struct wl_message *methods;\n int event_count;\n const struct wl_message *events;\n};]] $(cat requires)\nreturn ffi.C" > wlroots.lua
+rm -r requires headers
 printf " Done.\n"
 echo "Done."
